@@ -59,7 +59,7 @@ it('renders all current exhibits without mutating the content or archive mapping
   const before = JSON.stringify({ historyExhibits, archiveAssets });
   const timeline = renderTimeline(historyExhibits);
   const articles = renderArchive(historyExhibits, archiveAssets);
-  expect(timeline.match(/data-timeline-target=/g)).toHaveLength(14);
-  expect(articles.match(/data-archive-article/g)).toHaveLength(14);
+  expect(timeline.match(/data-timeline-target=/g)).toHaveLength(23);
+  expect(articles.match(/data-archive-article/g)).toHaveLength(23);
   expect(JSON.stringify({ historyExhibits, archiveAssets })).toBe(before);
 });
