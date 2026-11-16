@@ -1,4 +1,5 @@
 import type { ChapterController } from '../../app/types';
+import { getQualityPreference } from '../../shared/performance';
 
 export type LidarExplorerController = (() => void) & ChapterController;
 
@@ -45,7 +46,7 @@ export function mount(host: HTMLElement): LidarExplorerController {
       resize();
       if (active && !loaded) {
         loaded = true;
-        frame.src = `${import.meta.env.BASE_URL}lidar/index.html`;
+        frame.src = `${import.meta.env.BASE_URL}lidar/index.html?quality=${getQualityPreference()}`;
       }
       notify();
     },

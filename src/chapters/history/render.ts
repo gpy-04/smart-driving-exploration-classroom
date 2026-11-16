@@ -30,8 +30,11 @@ export function renderArchive(
   return exhibits
     .map((exhibit) => {
       const archive = exhibit.imageTitle ? assets[exhibit.imageTitle] : undefined;
+      const responsivePhoto = archive?.image?.match(/\.(jpe?g|png)$/i)
+        ? `<source type="image/webp" srcset="${archive.image.replace(/\.(jpe?g|png)$/i, '-480.webp')} 480w, ${archive.image.replace(/\.(jpe?g|png)$/i, '-960.webp')} 960w" sizes="(max-width: 760px) 94vw, 45vw" />`
+        : '';
       const imageMarkup = archive?.image
-        ? `<figure class="archive-article__media"><img src="${archive.image}" alt="${archive.imageAlt ?? exhibit.title}" loading="lazy" draggable="false" /><figcaption>${archive.caption ?? ''}</figcaption></figure>`
+        ? `<figure class="archive-article__media"><picture>${responsivePhoto}<img src="${archive.image}" alt="${archive.imageAlt ?? exhibit.title}" loading="lazy" decoding="async" draggable="false" /></picture><figcaption>${archive.caption ?? ''}</figcaption></figure>`
         : `<div class="archive-article__media archive-article__media--empty"><span>ARCHIVE NOTE</span><strong>未来展望</strong><small>智能系统与人的监督一起守护出行安全。</small></div>`;
       return `
       <article class="archive-article archive-article--${exhibit.track}${exhibit.mainline ? ' archive-article--mainline' : ''}" id="${exhibit.id}" data-archive-article>

@@ -1,5 +1,16 @@
 # Third-party asset notices
 
+## Performance derivatives and decoder (2026-11-16)
+
+Responsive `*-480.webp` and `*-960.webp` history photographs are resized/re-encoded
+versions of the corresponding original photographs below. Their subjects and composition
+are unchanged; the original attribution and license terms continue to apply.
+
+`meshoptimizer` 0.25.0 is distributed under the MIT License, copyright (c) 2016–2025
+Arseny Kapoulkine. The decoder's full notice is retained in
+`public/licenses/meshoptimizer-MIT.txt`. The compressed GLBs retain the licensing
+of their original assets; compression does not change ownership.
+
 ## Velodyne VLP-16 meshes
 
 The following model files are from `Eddylib/velodyne_simulator`, pinned at commit

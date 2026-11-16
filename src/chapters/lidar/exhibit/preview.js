@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { loadGltf } from '../../../shared/gltf';
+import { createAnimationLoop } from '../../../shared/lifecycle';
+import { rendererOptions, resizeRenderer } from '../../../shared/renderer-quality';
+import { getQualityProfile, watchQuality } from '../../../shared/performance';
+import { disposeObject, disposeRenderer } from '../../../shared/three-resources';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {finishHardware,createShowcase} from './exhibit-finish.js';
 
@@ -8,6 +12,8 @@ async function bootExhibit(){
 const $ = s => document.querySelector(s);
 const assetBase=import.meta.env.BASE_URL+'assets/lidar/ld016/';
 let chapterActive=true;
+let dirty=true;
+const invalidate=()=>{dirty=true;};
 const clamp = THREE.MathUtils.clamp;
 const v = a => new THREE.Vector3(a[0], a[2], -a[1]); // Blender Z-up -> glTF Y-up.
 const PARTS = [
@@ -27,26 +33,29 @@ const PARTS = [
 const state = {mode:'assembled', selected:PARTS[0][0], running:!matchMedia('(prefers-reduced-motion: reduce)').matches, isolated:false, explode:0, angle:0, channel:8, pulse:null, ready:false, hits:0, pointCount:0};
 let model, manifest, scanModel, activeLabel=null, cameraGoal=null, targetGoal=null;
 const nodes = new Map(), homes = new Map(), materials = new Map();
+const partMeshCache=new Map(), rotatingRigs=[], transformRigs=[];
+let lastAngle=NaN,lastExplode=NaN;
 const stage = new THREE.Scene();
 const stageCamera = new THREE.PerspectiveCamera(35,1,.001,8);
 stageCamera.position.set(.19,.19,.23);
+const rendererObservers=[];
 function makeRenderer(container, scene, camera) {
-  const r = new THREE.WebGLRenderer({antialias:true,alpha:true,powerPreference:'high-performance'});
-  r.setPixelRatio(Math.min(devicePixelRatio,1.5)); r.setClearColor(0,0); r.outputColorSpace=THREE.SRGBColorSpace;
+  const r = new THREE.WebGLRenderer({...rendererOptions(),alpha:true});
+  r.setClearColor(0,0); r.outputColorSpace=THREE.SRGBColorSpace;
   r.toneMapping=THREE.ACESFilmicToneMapping;r.toneMappingExposure=1.18;
-  r.shadowMap.enabled=true;r.shadowMap.type=THREE.PCFSoftShadowMap;
+  r.shadowMap.enabled=scene===stage&&getQualityProfile().shadows;r.shadowMap.type=THREE.PCFSoftShadowMap;
   container.append(r.domElement);
-  const resize=()=>{const w=container.clientWidth,h=container.clientHeight;if(!w||!h)return;camera.aspect=w/h;camera.updateProjectionMatrix();r.setSize(w,h,false);};
-  new ResizeObserver(resize).observe(container);resize();
+  const resize=()=>{const w=container.clientWidth,h=container.clientHeight;if(!w||!h)return;camera.aspect=w/h;camera.updateProjectionMatrix();resizeRenderer(r,w,h);invalidate();};
+  const observer=new ResizeObserver(resize);observer.observe(container);rendererObservers.push({observer,resize});resize();
   return r;
 }
 const renderer=makeRenderer($('#model-view'),stage,stageCamera);
 const pmrem=new THREE.PMREMGenerator(renderer);
-const environment=pmrem.fromScene(new RoomEnvironment(),.04);stage.environment=environment.texture;pmrem.dispose();
+const room=new RoomEnvironment();const environment=pmrem.fromScene(room,.04);stage.environment=environment.texture;room.dispose();pmrem.dispose();
 function light(scene,pos,color,intensity){const l=new THREE.DirectionalLight(color,intensity);l.position.set(...pos);scene.add(l);return l;}
 stage.environmentIntensity=.6;
 stage.add(new THREE.HemisphereLight(0xc9eeff,0x182b42,.4));const key=light(stage,[.2,.4,.3],0xe5f2ff,1.7);light(stage,[-.2,.1,-.3],0x7fcde4,1.1);light(stage,[.3,.2,-.2],0x9faeff,.65);
-key.castShadow=true;key.shadow.mapSize.set(2048,2048);Object.assign(key.shadow.camera,{left:-.25,right:.3,top:.4,bottom:-.15,near:.01,far:1.4});key.shadow.bias=-.00002;key.shadow.normalBias=.00012;
+key.castShadow=true;key.shadow.mapSize.set(1024,1024);Object.assign(key.shadow.camera,{left:-.25,right:.3,top:.4,bottom:-.15,near:.01,far:1.4});key.shadow.bias=-.00002;key.shadow.normalBias=.00012;
 const floor=new THREE.Mesh(new THREE.PlaneGeometry(.7,.7),new THREE.ShadowMaterial({color:0x000000,opacity:.24}));floor.rotation.x=-Math.PI/2;floor.position.y=-.012;floor.receiveShadow=true;stage.add(floor);
 const controls=new OrbitControls(stageCamera,renderer.domElement);controls.target.set(0,.043,0);controls.enableDamping=true;controls.dampingFactor=.09;controls.minDistance=.025;controls.maxDistance=1.4;controls.maxPolarAngle=Math.PI*.96;controls.update();
 controls.addEventListener('start',()=>{cameraGoal=targetGoal=null;});
@@ -58,6 +67,7 @@ const stageRay=new THREE.Line(stageRayGeom,new THREE.LineBasicMaterial({color:0x
 const scanScene=new THREE.Scene();scanScene.background=new THREE.Color(0x192e35);scanScene.fog=new THREE.Fog(0x192e35,22,50);
 const scanCamera=new THREE.PerspectiveCamera(43,1,.02,90);scanCamera.position.set(-7,6,10);
 const scanRenderer=makeRenderer($('#scan-view'),scanScene,scanCamera);scanScene.environment=environment.texture;
+const stopQuality=watchQuality(profile=>{renderer.shadowMap.enabled=profile.shadows;for(const item of rendererObservers)item.resize();});
 const scanControls=new OrbitControls(scanCamera,scanRenderer.domElement);scanControls.target.set(1.6,.65,0);scanControls.enableDamping=true;scanControls.minDistance=3;scanControls.maxDistance=24;scanControls.maxPolarAngle=Math.PI*.48;scanControls.update();
 scanScene.add(new THREE.HemisphereLight(0xc6e6ed,0x263a3a,2.3));light(scanScene,[3,8,4],0xfff0d2,3);
 const targets=[];
@@ -80,41 +90,49 @@ function textSprite(text,pos){const c=document.createElement('canvas');c.width=5
 textSprite('传感器 · 离地 1.5 m',[0,2.15,0]);
 const scanRaycaster=new THREE.Raycaster();scanRaycaster.far=18;
 const capacity=16000, cloudPos=new Float32Array(capacity*3),cloudColors=new Float32Array(capacity*3);
-const cloudGeom=new THREE.BufferGeometry();cloudGeom.setAttribute('position',new THREE.BufferAttribute(cloudPos,3));cloudGeom.setAttribute('color',new THREE.BufferAttribute(cloudColors,3));cloudGeom.setDrawRange(0,0);
+const cloudGeom=new THREE.BufferGeometry();cloudGeom.setAttribute('position',new THREE.BufferAttribute(cloudPos,3).setUsage(THREE.DynamicDrawUsage));cloudGeom.setAttribute('color',new THREE.BufferAttribute(cloudColors,3).setUsage(THREE.DynamicDrawUsage));cloudGeom.setDrawRange(0,0);
 const cloud=new THREE.Points(cloudGeom,new THREE.PointsMaterial({size:.045,vertexColors:true,sizeAttenuation:true,transparent:true,opacity:.95,depthWrite:false}));cloud.frustumCulled=false;scanScene.add(cloud);
 const livePositions=new Float32Array(16*6);const liveGeom=new THREE.BufferGeometry();liveGeom.setAttribute('position',new THREE.BufferAttribute(livePositions,3));liveGeom.setDrawRange(0,0);
 const liveRays=new THREE.LineSegments(liveGeom,new THREE.LineBasicMaterial({color:0xf8b160,transparent:true,opacity:.31,depthWrite:false}));liveRays.frustumCulled=false;scanScene.add(liveRays);
 const returnGeom=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);const returnRay=new THREE.Line(returnGeom,new THREE.LineBasicMaterial({color:0x7ce0cb,transparent:true,opacity:.8}));returnRay.visible=false;scanScene.add(returnRay);
 const pulseBall=new THREE.Mesh(new THREE.SphereGeometry(.065,16,8),new THREE.MeshBasicMaterial({color:0xffbc68}));pulseBall.visible=false;scanScene.add(pulseBall);
-let cloudIndex=0,totalPoints=0,scanAccumulator=0;
-function clearCloud(){cloudIndex=0;totalPoints=0;cloudGeom.setDrawRange(0,0);state.pointCount=0;}
+let cloudIndex=0,totalPoints=0,scanAccumulator=0,cloudDirtyStart=capacity,cloudDirtyEnd=0;
+function clearCloud(){invalidate();cloudIndex=0;totalPoints=0;cloudDirtyStart=capacity;cloudDirtyEnd=0;cloudGeom.setDrawRange(0,0);state.pointCount=0;}
 function setLine(line,a,b){const attr=line.geometry.attributes.position;attr.setXYZ(0,a.x,a.y,a.z);attr.setXYZ(1,b.x,b.y,b.z);attr.needsUpdate=true;line.geometry.computeBoundingSphere();}
+const rayRotation=new THREE.Quaternion(),upAxis=new THREE.Vector3(0,1,0),sensorOffset=new THREE.Vector3(0,1.5,0);
+let batchTargets=null;
 function channelRay(i,angle){
-  const ch=manifest.channels[i],rotation=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),angle);
-  const tx=v(ch.origin_m).applyQuaternion(rotation).add(new THREE.Vector3(0,1.5,0));
-  const rx=v(ch.receive_origin_m).applyQuaternion(rotation).add(new THREE.Vector3(0,1.5,0));
+  // A 16-channel sample shares one scene update and one visibility list. Public
+  // single-channel calls still refresh matrices so direct wall edits are observed.
+  if(!batchTargets)scanScene.updateMatrixWorld(true);
+  const visibleTargets=batchTargets??targets.filter(t=>t.visible);
+  const ch=manifest.channels[i],rotation=rayRotation.setFromAxisAngle(upAxis,angle);
+  const tx=v(ch.origin_m).applyQuaternion(rotation).add(sensorOffset);
+  const rx=v(ch.receive_origin_m).applyQuaternion(rotation).add(sensorOffset);
   const direction=v(ch.direction).applyQuaternion(rotation).normalize();
-  scanRaycaster.set(tx,direction);scanScene.updateMatrixWorld(true);
-  const hit=scanRaycaster.intersectObjects(targets.filter(t=>t.visible),false)[0];
+  scanRaycaster.set(tx,direction);
+  const hit=scanRaycaster.intersectObjects(visibleTargets,false)[0];
   if(!hit)return {tx,rx,direction,hit:null};
   // A return must also have a clear path to its corresponding receiver.
   const towardRx=rx.clone().sub(hit.point);const returnLength=towardRx.length();
   scanRaycaster.set(hit.point.clone().addScaledVector(towardRx.clone().normalize(),.0001),towardRx.normalize());scanRaycaster.far=returnLength-.0002;
-  const blocked=scanRaycaster.intersectObjects(targets.filter(t=>t.visible),false).length>0;scanRaycaster.far=18;
+  const blocked=scanRaycaster.intersectObjects(visibleTargets,false).length>0;scanRaycaster.far=18;
   return {tx,rx,direction,hit:blocked?null:hit,returnLength};
 }
-function recordHit(ray){if(!ray.hit)return;const p=ray.hit.point;cloudPos.set([p.x,p.y,p.z],cloudIndex*3);const col=new THREE.Color().setHSL(.43+clamp(ray.hit.distance/18,0,1)*.1,.65,.62);cloudColors.set([col.r,col.g,col.b],cloudIndex*3);cloudIndex=(cloudIndex+1)%capacity;totalPoints=Math.min(totalPoints+1,capacity);state.pointCount=totalPoints;state.hits++;cloudGeom.setDrawRange(0,totalPoints);cloudGeom.attributes.position.needsUpdate=true;cloudGeom.attributes.color.needsUpdate=true;}
+const pointColor=new THREE.Color();
+function recordHit(ray){if(!ray.hit)return;const p=ray.hit.point,offset=cloudIndex*3;cloudPos[offset]=p.x;cloudPos[offset+1]=p.y;cloudPos[offset+2]=p.z;const col=pointColor.setHSL(.43+clamp(ray.hit.distance/18,0,1)*.1,.65,.62);cloudColors[offset]=col.r;cloudColors[offset+1]=col.g;cloudColors[offset+2]=col.b;cloudDirtyStart=Math.min(cloudDirtyStart,cloudIndex);cloudDirtyEnd=Math.max(cloudDirtyEnd,cloudIndex+1);cloudIndex=(cloudIndex+1)%capacity;totalPoints=Math.min(totalPoints+1,capacity);state.pointCount=totalPoints;state.hits++;cloudGeom.setDrawRange(0,totalPoints);}
+function uploadCloud(){if(cloudDirtyEnd<=cloudDirtyStart)return;for(const attr of [cloudGeom.attributes.position,cloudGeom.attributes.color]){attr.clearUpdateRanges();attr.addUpdateRange(cloudDirtyStart*3,(cloudDirtyEnd-cloudDirtyStart)*3);attr.needsUpdate=true;}cloudDirtyStart=capacity;cloudDirtyEnd=0;}
 function showReading(ray){$('#hit-name').textContent=ray.hit?.object.userData.target??'当前方向无回波';$('#hit-distance').textContent=ray.hit?`${((ray.hit.distance+ray.returnLength)/2).toFixed(3)} m`:'—';$('#hit-time').textContent=ray.hit?`${((ray.hit.distance+ray.returnLength)/299792458*1e9).toFixed(2)} ns`:'—';}
-function scanAt(angle,record=true){let count=0,selected;for(let i=0;i<16;i++){const ray=channelRay(i,angle);if(i===state.channel)selected=ray;if(!ray.hit)continue;if(record)recordHit(ray);livePositions.set([...ray.tx,...ray.hit.point],count*6);count++;}liveGeom.setDrawRange(0,count*2);liveGeom.attributes.position.needsUpdate=true;showReading(selected);return selected;}
-function partMeshes(part){const result=[];nodes.get(part)?.traverse(o=>{if(o.isMesh)result.push(o);});return result;}
+function scanAt(angle,record=true){invalidate();scanScene.updateMatrixWorld(true);batchTargets=targets.filter(t=>t.visible);let count=0,selected;try{for(let i=0;i<16;i++){const ray=channelRay(i,angle);if(i===state.channel)selected=ray;if(!ray.hit)continue;if(record)recordHit(ray);const offset=count*6,p=ray.hit.point;livePositions[offset]=ray.tx.x;livePositions[offset+1]=ray.tx.y;livePositions[offset+2]=ray.tx.z;livePositions[offset+3]=p.x;livePositions[offset+4]=p.y;livePositions[offset+5]=p.z;count++;}}finally{batchTargets=null;}liveGeom.setDrawRange(0,count*2);liveGeom.attributes.position.needsUpdate=true;showReading(selected);return selected;}
+function partMeshes(part){if(partMeshCache.has(part))return partMeshCache.get(part);const result=[];nodes.get(part)?.traverse(o=>{if(o.isMesh)result.push(o);});partMeshCache.set(part,result);return result;}
 function selectedBox(){const b=new THREE.Box3();for(const m of partMeshes(state.selected)){if(m.visible)b.expandByObject(m);}return b;}
 function restoreMaterials(){for(const [m,props] of materials){m.emissive.copy(props.emissive);m.emissiveIntensity=props.intensity;}}
-function selectPart(name){if(!nodes.has(name))return;state.selected=name;state.isolated=false;restoreMaterials();const i=PARTS.findIndex(p=>p[0]===name);const p=PARTS[i];$('#info-num').textContent=`${String(i+1).padStart(2,'0')} / 12`;$('#info-title').textContent=p[1];$('#info-text').textContent=p[2];$('#info-flow').textContent=p[3];document.querySelectorAll('[data-part]').forEach(b=>b.classList.toggle('active',b.dataset.part===name));for(const m of partMeshes(name)){m.material.emissive.setHex(0x2e8f7a);m.material.emissiveIntensity=.035;}$('#isolate-part').textContent='单独看零件';applyVisibility();activeLabel=name;}
+function selectPart(name){invalidate();if(!nodes.has(name))return;state.selected=name;state.isolated=false;restoreMaterials();const i=PARTS.findIndex(p=>p[0]===name);const p=PARTS[i];$('#info-num').textContent=`${String(i+1).padStart(2,'0')} / 12`;$('#info-title').textContent=p[1];$('#info-text').textContent=p[2];$('#info-flow').textContent=p[3];document.querySelectorAll('[data-part]').forEach(b=>b.classList.toggle('active',b.dataset.part===name));for(const m of partMeshes(name)){m.material.emissive.setHex(0x2e8f7a);m.material.emissiveIntensity=.035;}$('#isolate-part').textContent='单独看零件';applyVisibility();activeLabel=name;}
 function applyVisibility(){if(!model)return;model.traverse(o=>{o.visible=true;});for(const n of ['ir_window','top_lid'])nodes.get(n).visible=state.mode==='assembled'||state.mode==='exploded';if(state.isolated){const chosen=new Set(partMeshes(state.selected));model.traverse(o=>{if(o.isMesh)o.visible=chosen.has(o);});for(const n of ['ir_window','top_lid'])nodes.get(n).visible=true;}}
-function frameBox(b){if(b.isEmpty())return;const center=b.getCenter(new THREE.Vector3()),size=b.getSize(new THREE.Vector3());const fit=Math.max(size.y,size.x/stageCamera.aspect,size.z)*.65/Math.tan(THREE.MathUtils.degToRad(stageCamera.fov/2));const direction=stageCamera.position.clone().sub(controls.target).normalize();cameraGoal=center.clone().addScaledVector(direction,Math.max(.035,fit*1.15));targetGoal=center;}
+function frameBox(b){invalidate();if(b.isEmpty())return;const center=b.getCenter(new THREE.Vector3()),size=b.getSize(new THREE.Vector3());const fit=Math.max(size.y,size.x/stageCamera.aspect,size.z)*.65/Math.tan(THREE.MathUtils.degToRad(stageCamera.fov/2));const direction=stageCamera.position.clone().sub(controls.target).normalize();cameraGoal=center.clone().addScaledVector(direction,Math.max(.035,fit*1.15));targetGoal=center;}
 function resetCamera(){const b=new THREE.Box3();model?.traverse(o=>{if(o.isMesh&&o.visible)b.expandByObject(o);});if(state.mode!=='exploded'&&!state.isolated)b.expandByObject(showcase.podium);frameBox(b);}
-function syncTransforms(){for(const [name,o] of nodes){const home=homes.get(name);o.position.copy(home.position);if(o.userData.explode_m)o.position.addScaledVector(v(o.userData.explode_m),state.explode);o.quaternion.copy(home.quaternion);}for(const n of manifest.rotating_nodes){const o=nodes.get(n);if(o)o.rotateY(state.angle*(1-state.explode));}if(scanModel){for(const n of manifest.rotating_nodes){const o=scanModel.getObjectByName(n);if(o){o.quaternion.copy(homes.get(n).quaternion);o.rotateY(state.angle);}}}stage.updateMatrixWorld(true);}
-function setMode(mode){if(!state.ready)return;state.mode=mode;const modelWrap=document.querySelector('.view-wrap'),scanWrap=document.querySelector('.scan-wrap');if(mode==='scan'){scanWrap.append(modelWrap);}else{document.querySelector('.exhibit').insertBefore(modelWrap,scanWrap);}state.isolated=false;state.pulse=null;pulseBall.visible=returnRay.visible=stageRay.visible=false;document.body.classList.toggle('scanning',mode==='scan');$('.scan-wrap').hidden=mode!=='scan';$('#scan-controls').hidden=mode!=='scan';document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));$('#view-label').textContent=({assembled:'ASSEMBLED / 完整外观',cutaway:'INTERNAL / 内部结构',exploded:'EXPLODED / 总成拆解',scan:'OPTICAL HEAD / 光学头近景'})[mode];$('#state-label').textContent=({assembled:'完整装配 · 保护内部光学组件',cutaway:'外壳已打开 · 转动速度已放慢',exploded:'拆解观察 · 工作转动已停止',scan:'首表面回波 · 传播过程为慢放示意'})[mode];grid.visible=false;floor.visible=mode!=='exploded';$('#rotate').disabled=mode==='exploded';applyVisibility();setTimeout(resetCamera,800);if(mode==='scan'){state.angle=0;clearCloud();}}
+function syncTransforms(){if(lastAngle===state.angle&&lastExplode===state.explode)return;lastAngle=state.angle;lastExplode=state.explode;for(const {node,home,offset}of transformRigs){node.position.copy(home.position).addScaledVector(offset,state.explode);node.quaternion.copy(home.quaternion);}for(const {node,scanNode,home}of rotatingRigs){node.rotateY(state.angle*(1-state.explode));if(scanNode){scanNode.quaternion.copy(home.quaternion);scanNode.rotateY(state.angle);}}stage.updateMatrixWorld(true);}
+function setMode(mode){invalidate();if(!state.ready)return;state.mode=mode;const modelWrap=document.querySelector('.view-wrap'),scanWrap=document.querySelector('.scan-wrap');if(mode==='scan'){scanWrap.append(modelWrap);}else{document.querySelector('.exhibit').insertBefore(modelWrap,scanWrap);}state.isolated=false;state.pulse=null;pulseBall.visible=returnRay.visible=stageRay.visible=false;document.body.classList.toggle('scanning',mode==='scan');$('.scan-wrap').hidden=mode!=='scan';$('#scan-controls').hidden=mode!=='scan';document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));$('#view-label').textContent=({assembled:'ASSEMBLED / 完整外观',cutaway:'INTERNAL / 内部结构',exploded:'EXPLODED / 总成拆解',scan:'OPTICAL HEAD / 光学头近景'})[mode];$('#state-label').textContent=({assembled:'完整装配 · 保护内部光学组件',cutaway:'外壳已打开 · 转动速度已放慢',exploded:'拆解观察 · 工作转动已停止',scan:'首表面回波 · 传播过程为慢放示意'})[mode];grid.visible=false;floor.visible=mode!=='exploded';$('#rotate').disabled=mode==='exploded';applyVisibility();setTimeout(resetCamera,800);if(mode==='scan'){state.angle=0;clearCloud();}}
 for(let i=0;i<PARTS.length;i++){const p=PARTS[i],b=document.createElement('button');b.dataset.part=p[0];b.innerHTML=`<span>${String(i+1).padStart(2,'0')}</span>${p[1]}`;b.onclick=()=>selectPart(p[0]);$('#part-grid').append(b);}
 document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>setMode(b.dataset.mode));
 function updateRunningButton(){$('#rotate').textContent=state.running?'暂停转动':'继续转动';}
@@ -128,27 +146,53 @@ $('#clear-cloud').onclick=clearCloud;
 const obstacleButton=document.createElement('button');obstacleButton.id='toggle-obstacle';obstacleButton.textContent='加入近处遮挡';obstacleButton.style.cssText='width:100%;font-size:11px;margin:0 0 12px';$('.readings').before(obstacleButton);obstacleButton.onclick=()=>{obstacle.visible=!obstacle.visible;obstacleButton.textContent=obstacle.visible?'移除近处遮挡':'加入近处遮挡';clearCloud();state.pulse=null;pulseBall.visible=returnRay.visible=false;scanAt(state.angle,false);};
 $('#single-pulse').onclick=()=>{state.running=false;state.angle=0;state.explode=0;updateRunningButton();syncTransforms();const ray=scanAt(0,false);state.pulse={ray,t:0};recordHit(ray);pulseBall.visible=!!ray.hit;returnRay.visible=false;stageRay.visible=!!ray.hit;liveGeom.setDrawRange(0,ray.hit?2:0);if(ray.hit){livePositions.set([...ray.tx,...ray.hit.point],0);liveGeom.attributes.position.needsUpdate=true;}const ch=manifest.channels[state.channel],start=v(ch.origin_m);setLine(stageRay,start,start.clone().addScaledVector(v(ch.direction),.045));};
 let down=null;renderer.domElement.addEventListener('pointerdown',e=>{down=[e.clientX,e.clientY];});renderer.domElement.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>6)return;const rect=renderer.domElement.getBoundingClientRect(),pointer=new THREE.Vector2((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1),r=new THREE.Raycaster();r.setFromCamera(pointer,stageCamera);const hits=r.intersectObject(model,true).filter(h=>{let o=h.object;while(o){if(!o.visible)return false;o=o.parent;}return true;});if(!hits.length)return;let o=hits[0].object;while(o&&!PARTS.some(p=>p[0]===o.name))o=o.parent;if(o){selectPart(o.name);if(innerWidth<721)$('#info-title').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'instant':'smooth',block:'nearest'});}});
-try{manifest=await (await fetch(assetBase+'model-manifest.json')).json();const gltf=await new GLTFLoader().loadAsync(assetBase+'LD016-engineering.glb');model=gltf.scene;finishHardware(model);model.traverse(o=>{if(o.userData.explode_m){nodes.set(o.name,o);homes.set(o.name,{position:o.position.clone(),quaternion:o.quaternion.clone()});}if(o.isMesh){o.material=o.material.clone();materials.set(o.material,{emissive:o.material.emissive.clone(),intensity:o.material.emissiveIntensity});o.castShadow=o.receiveShadow=true;}});stage.add(model);scanModel=model.clone(true);scanModel.position.y=1.5;scanScene.add(scanModel);state.ready=true;$('#loading').hidden=true;selectPart(PARTS[0][0]);setMode('assembled');resetCamera();if(new URLSearchParams(location.search).get('view')==='scan')setMode('scan');if(new URLSearchParams(location.search).get('view')==='board'){setMode('cutaway');selectPart('timing_board');setTimeout(()=>document.querySelector('#isolate-part').click(),900);}}
+try{manifest=await (await fetch(assetBase+'model-manifest.json')).json();const gltf=await loadGltf('/assets/lidar/ld016/LD016-engineering.glb');model=gltf.scene;finishHardware(model);model.traverse(o=>{if(o.userData.explode_m){nodes.set(o.name,o);homes.set(o.name,{position:o.position.clone(),quaternion:o.quaternion.clone()});}if(o.isMesh){o.material=o.material.clone();materials.set(o.material,{emissive:o.material.emissive.clone(),intensity:o.material.emissiveIntensity});o.castShadow=o.receiveShadow=true;}});stage.add(model);scanModel=model.clone(true);scanModel.position.y=1.5;scanScene.add(scanModel);state.ready=true;$('#loading').hidden=true;selectPart(PARTS[0][0]);setMode('assembled');resetCamera();if(new URLSearchParams(location.search).get('view')==='scan')setMode('scan');if(new URLSearchParams(location.search).get('view')==='board'){setMode('cutaway');selectPart('timing_board');setTimeout(()=>document.querySelector('#isolate-part').click(),900);}}
 catch(e){$('#loading').textContent='模型载入失败，请刷新重试。';console.error(e);if(parent!==window)parent.postMessage({type:'lidar-exhibit:error'},location.origin);}
-let last=performance.now();function frame(now){requestAnimationFrame(frame);const dt=Math.min((now-last)/1000,.05);last=now;if(document.hidden||!chapterActive||!state.ready)return;
+if(state.ready){
+ for(const [name,node]of nodes)transformRigs.push({node,home:homes.get(name),offset:v(node.userData.explode_m??[0,0,0])});
+ for(const name of manifest.rotating_nodes){const node=nodes.get(name);if(node)rotatingRigs.push({node,scanNode:scanModel.getObjectByName(name),home:homes.get(name)});}
+ const moving=new Set(nodes.values());
+ for(const root of [model,scanModel])root.traverse(object=>{if(object.isMesh&&!moving.has(object)&&!object.userData.explode_m){object.updateMatrix();object.matrixAutoUpdate=false;}});
+}
+const uiAborter=new AbortController();
+for(const event of ['click','input','keydown','pointerdown'])document.addEventListener(event,invalidate,{capture:true,signal:uiAborter.signal});
+controls.addEventListener('change',invalidate);scanControls.addEventListener('change',invalidate);
+let labelElapsed=0;
+let modelVisible=true,scanVisible=false;
+const loop=createAnimationLoop(renderer,dt=>{
+ if(!state.ready)return;
+ labelElapsed+=dt;
+ let changed=dirty;dirty=false;
  const target=state.mode==='exploded'?1:0;const old=state.explode;state.explode=THREE.MathUtils.damp(state.explode,target,7,dt);if(Math.abs(state.explode-target)<.0005)state.explode=target;
- if(state.running&&state.mode!=='exploded'&&state.explode===0&&!state.pulse)state.angle=(state.angle+dt*(state.mode==='scan'?.4:.25))%(Math.PI*2);
+ if(state.running&&state.mode!=='exploded'&&state.explode===0&&!state.pulse){state.angle=(state.angle+dt*(state.mode==='scan'?.4:.25))%(Math.PI*2);changed=true;}
+ if(old!==state.explode)changed=true;
  syncTransforms();if(old!==state.explode&&cameraGoal===null&&Math.abs(state.explode-target)<.01)resetCamera();
- if(cameraGoal){stageCamera.position.lerp(cameraGoal,1-Math.exp(-dt*6));controls.target.lerp(targetGoal,1-Math.exp(-dt*6));if(stageCamera.position.distanceTo(cameraGoal)<.00005){cameraGoal=targetGoal=null;}}
- controls.update();marker.visible=state.isolated; if(marker.visible)marker.box.copy(selectedBox());
- if(activeLabel){const b=selectedBox();if(!b.isEmpty()){const p=b.getCenter(new THREE.Vector3()).project(stageCamera);const rect=$('#model-view').getBoundingClientRect();$('#part-label').textContent=PARTS.find(x=>x[0]===activeLabel)?.[1]??'';$('#part-label').hidden=p.z>1||state.mode==='assembled';$('#part-label').style.left=`${clamp((p.x*.5+.5)*rect.width+20,10,rect.width-140)}px`;$('#part-label').style.top=`${clamp((-p.y*.5+.5)*rect.height-20,45,rect.height-95)}px`;}}
+ if(cameraGoal){changed=true;stageCamera.position.lerp(cameraGoal,1-Math.exp(-dt*6));controls.target.lerp(targetGoal,1-Math.exp(-dt*6));if(stageCamera.position.distanceTo(cameraGoal)<.00005){cameraGoal=targetGoal=null;}}
+ if(controls.update(dt))changed=true;
+ if(state.mode==='scan'&&scanControls.update(dt))changed=true;
+ if(state.pulse&&state.pulse.t<1.8)changed=true;
+ if(!changed)return;
+ marker.visible=state.isolated; if(marker.visible)marker.box.copy(selectedBox());
+ if(state.mode==='assembled')$('#part-label').hidden=true;
+ else if(modelVisible&&activeLabel&&labelElapsed>=.1){labelElapsed=0;const b=selectedBox();if(!b.isEmpty()){const p=b.getCenter(new THREE.Vector3()).project(stageCamera);const rect=$('#model-view').getBoundingClientRect();$('#part-label').textContent=PARTS.find(x=>x[0]===activeLabel)?.[1]??'';$('#part-label').hidden=p.z>1;$('#part-label').style.left=`${clamp((p.x*.5+.5)*rect.width+20,10,rect.width-140)}px`;$('#part-label').style.top=`${clamp((-p.y*.5+.5)*rect.height-20,45,rect.height-95)}px`;}}
  if(state.mode==='scan'){
-   scanAccumulator+=dt;if(scanAccumulator>.04&&!state.pulse){scanAt(state.angle,state.running);scanAccumulator=0;}
-   if(state.pulse){const p=state.pulse;p.t+=dt;const ray=p.ray;if(ray.hit){const a=clamp(p.t/.9,0,2);if(a<1){pulseBall.position.lerpVectors(ray.tx,ray.hit.point,a);pulseBall.material.color.setHex(0xffbc68);}else{pulseBall.position.lerpVectors(ray.hit.point,ray.rx,a-1);pulseBall.material.color.setHex(0x7ce0cb);returnRay.visible=true;setLine(returnRay,ray.hit.point,ray.rx);}pulseBall.visible=a<2;stageRay.material.color.setHex(a<1?0xffbc68:0x7ce0cb);if(a>=2)stageRay.visible=false;}}
-   scanControls.update();scanRenderer.render(scanScene,scanCamera);
- }showcase.render(dt,state);
-}requestAnimationFrame(frame);
+   scanAccumulator+=dt;if(scanAccumulator>.04&&!state.pulse&&state.running){scanAt(state.angle,true);scanAccumulator=0;}
+   if(state.pulse&&state.pulse.t<1.8){const p=state.pulse;p.t=Math.min(1.8,p.t+dt);const ray=p.ray;if(ray.hit){const a=clamp(p.t/.9,0,2);if(a<1){pulseBall.position.lerpVectors(ray.tx,ray.hit.point,a);pulseBall.material.color.setHex(0xffbc68);}else{pulseBall.position.lerpVectors(ray.hit.point,ray.rx,a-1);pulseBall.material.color.setHex(0x7ce0cb);returnRay.visible=true;setLine(returnRay,ray.hit.point,ray.rx);}pulseBall.visible=a<2;stageRay.material.color.setHex(a<1?0xffbc68:0x7ce0cb);if(a>=2)stageRay.visible=false;}}
+   if(scanVisible){uploadCloud();scanRenderer.render(scanScene,scanCamera);}
+ }if(modelVisible)showcase.render(dt,state);
+},error=>{console.error(error);if(parent!==window)parent.postMessage({type:'lidar-exhibit:error'},location.origin);});
+const syncActive=()=>{invalidate();loop.setActive(!document.hidden&&chapterActive&&(modelVisible||scanVisible));};
+const viewObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.target.id==='model-view')modelVisible=entry.isIntersecting;else scanVisible=entry.isIntersecting;}syncActive();});
+viewObserver.observe($('#model-view'));viewObserver.observe($('#scan-view'));
+document.addEventListener('visibilitychange',syncActive);
+syncActive();
 // Small inspection interface used by the independent preview's validation script.
 window.LD016={state,manifest,nodes,stage,stageCamera,controls,scanScene,targets,wall,obstacle,setMode,selectPart,scanAt,channelRay,resetCamera,renderer,scanRenderer,clearCloud,showcase};
-window.addEventListener('pagehide',()=>{showcase.dispose();renderer.dispose();scanRenderer.dispose();environment.dispose();},{once:true});
+window.addEventListener('pagehide',event=>{loop.setActive(false);if(event.persisted)return;loop.dispose();uiAborter.abort();stopQuality();viewObserver.disconnect();rendererObservers.forEach(item=>item.observer.disconnect());document.removeEventListener('visibilitychange',syncActive);controls.dispose();scanControls.dispose();showcase.dispose();disposeObject(stage);disposeObject(scanScene);disposeRenderer(renderer);disposeRenderer(scanRenderer);environment.dispose();});
+window.addEventListener('pageshow',syncActive);
 
 // The museum owns visibility; preserve the user's scan and camera while inactive.
-window.addEventListener('message',event=>{if(event.source!==parent||event.origin!==location.origin)return;const message=event.data;if(message?.type==='lidar-exhibit:active')chapterActive=!!message.active;});
+window.addEventListener('message',event=>{if(event.source!==parent||event.origin!==location.origin)return;const message=event.data;if(message?.type==='lidar-exhibit:active'){chapterActive=!!message.active;syncActive();}});
 if(parent!==window)parent.postMessage({type:'lidar-exhibit:loaded'},location.origin);
 
 }

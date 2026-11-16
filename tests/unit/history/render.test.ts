@@ -40,7 +40,8 @@ it('renders an available image with title fallback, caption and badge', () => {
   const result = renderArchive(exhibits.slice(0, 1), {
     照片: { image: '/example.jpg', caption: '档案说明' },
   });
-  expect(result).toContain('src="/example.jpg" alt="起点" loading="lazy" draggable="false"');
+  expect(result).toContain('src="/example.jpg" alt="起点" loading="lazy" decoding="async" draggable="false"');
+  expect(result).toContain('/example-480.webp 480w, /example-960.webp 960w');
   expect(result).toContain('<figcaption>档案说明</figcaption>');
   expect(result).toContain('<span class="archive-article__badge">里程碑</span>');
   expect(result).toContain('<p class="archive-article__story">故事一</p>');

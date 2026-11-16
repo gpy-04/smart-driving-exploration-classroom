@@ -22,6 +22,7 @@
 .history-paper .archive-article__grid { grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: clamp(28px, 5vw, 74px); align-items: center; padding-top: 0; }
 .history-paper .archive-article__media { min-width: 0; padding-right: clamp(20px, 4vw, 56px); border-right: 1px solid var(--hairline); }
 .history-paper .archive-article__media img { aspect-ratio: 1.55 / 1; }
+.history-paper .archive-article__media picture { display:block; }
 .history-paper .archive-article__copy { min-height: 0; padding-top: 4px; }
 .history-paper .archive-article__detail { max-width: 28em; font-size: clamp(1.15rem, 1.8vw, 1.55rem); line-height: 1.7; }
 .history-paper .archive-article__story { max-width: 42em; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--hairline); color: var(--muted); font-family: var(--body); font-size: 13px; line-height: 1.85; }

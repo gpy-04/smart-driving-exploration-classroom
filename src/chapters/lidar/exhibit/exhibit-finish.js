@@ -3,6 +3,7 @@ import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
 import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
 import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
 import {OutputPass} from 'three/addons/postprocessing/OutputPass.js';
+import {getQualityProfile,watchQuality} from '../../../shared/performance';
 
 // Preview finish only: authored surface colors, not a change to the mechanical rig.
 const palette=[
@@ -47,17 +48,20 @@ export function createShowcase({scene,camera,renderer,container}){
  const glows=[];
  function glow(color,pos,power){const l=new THREE.PointLight(color,power,.24,2);l.position.set(...pos);scene.add(l);glows.push(l);return l;}
  glow(0x2dd5f0,[.075,.035,.07],.0014);glow(0x6a7dff,[-.075,.065,-.04],.0018);
- const composer=new EffectComposer(renderer);const basePass=new RenderPass(scene,camera);composer.addPass(basePass);const bloom=new UnrealBloomPass(new THREE.Vector2(512,512),.24,.35,2.1);composer.addPass(bloom);composer.addPass(new OutputPass());
- function resize(){const w=container.clientWidth,h=container.clientHeight;if(!w||!h)return;composer.setPixelRatio(Math.min(renderer.getPixelRatio(),innerWidth<721?1:1.3));composer.setSize(w,h);}
- const observer=new ResizeObserver(resize);observer.observe(container);resize();
+ let composer=null,bloom=null,basePass=null,outputPass=null;
+ function releasePost(){bloom?.dispose();outputPass?.dispose();basePass?.dispose();composer?.dispose();composer=bloom=basePass=outputPass=null;}
+ function resize(){const w=container.clientWidth,h=container.clientHeight;if(!w||!h||!composer)return;composer.setPixelRatio(Math.min(renderer.getPixelRatio(),innerWidth<721?1:1.3));composer.setSize(w,h);}
+ function syncPost(){if(!effects||getQualityProfile().low){releasePost();return;}if(!composer){composer=new EffectComposer(renderer);basePass=new RenderPass(scene,camera);bloom=new UnrealBloomPass(new THREE.Vector2(256,256),.24,.35,2.1);outputPass=new OutputPass();composer.addPass(basePass);composer.addPass(bloom);composer.addPass(outputPass);}resize();}
+ const observer=new ResizeObserver(resize);observer.observe(container);
  let effects=true;const button=document.createElement('button');button.id='visual-fx';button.textContent='光效 开';button.setAttribute('aria-pressed','true');button.title='开启或关闭展台投影与柔光';document.querySelector('.canvas-actions').prepend(button);
- button.onclick=()=>{effects=!effects;button.textContent=effects?'光效 开':'光效 关';button.setAttribute('aria-pressed',String(effects));bloom.enabled=effects;};
+ button.onclick=()=>{effects=!effects;button.textContent=effects?'光效 开':'光效 关';button.setAttribute('aria-pressed',String(effects));syncPost();};
+ const stopQuality=watchQuality(syncPost);
  const reduced=matchMedia('(prefers-reduced-motion: reduce)');let timer=0;
  return{
-  render(dt,state){if(!reduced.matches&&state.running)timer+=dt;podium.visible=groundRings.visible=state.mode!=='exploded'&&!state.isolated;groundRings.visible=groundRings.visible&&effects;for(const l of glows)l.visible=effects;arc.rotation.z=timer*.23;emissive.emissiveIntensity=effects?4.2+Math.sin(timer*.7)*.25:1;renderer.info.reset();composer.render(dt);},
-  setEffects(value){effects=value;bloom.enabled=value;button.setAttribute('aria-pressed',String(value));button.textContent=value?'光效 开':'光效 关';},
+  render(dt,state){if(!reduced.matches&&state.running)timer+=dt;podium.visible=groundRings.visible=state.mode!=='exploded'&&!state.isolated;groundRings.visible=groundRings.visible&&effects;for(const l of glows)l.visible=effects&&!getQualityProfile().low;arc.rotation.z=timer*.23;emissive.emissiveIntensity=effects?4.2+Math.sin(timer*.7)*.25:1;renderer.info.reset();if(composer)composer.render(dt);else renderer.render(scene,camera);},
+  setEffects(value){effects=value;syncPost();button.setAttribute('aria-pressed',String(value));button.textContent=value?'光效 开':'光效 关';},
   get effects(){return effects;},
-  bloom,podium,groundRings,
-  dispose(){observer.disconnect();composer.dispose();bloom.dispose();}
+  get bloom(){return bloom;},podium,groundRings,
+  dispose(){stopQuality();observer.disconnect();releasePost();}
  };
 }
